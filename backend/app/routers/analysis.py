@@ -1,26 +1,31 @@
-# Analysis router — single endpoint that accepts an image upload,
-# runs detection + pose estimation, renders overlays, and returns results.
+# Analysis router — accepts a video upload, processes every frame with
+# detection + pose estimation, renders overlays, and returns an annotated MP4.
 
 from __future__ import annotations
 
 import logging
+import tempfile
+import time
 import uuid
 from pathlib import Path
 
-import cv2
-import numpy as np
-from fastapi import APIRouter, HTTPException, UploadFile, Query
+import json
 
-from app.models.schemas import AnalysisResponse
+import cv2
+from fastapi import APIRouter, HTTPException, UploadFile, Query
+from fastapi.responses import StreamingResponse
+
+from app.models.schemas import VideoAnalysisResponse
 from app.services.detection import DetectionService
 from app.services.pose import PoseService
 from app.services.rendering import render_overlays
+from app.services.video import VideoProcessor, encode_frame_preview
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
+RESULTS_DIR = Path(__file__).resolve().parent.parent.parent / "uploads" / "results"
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Module-level singletons (initialised lazily)
 _detection_service: DetectionService | None = None
@@ -41,67 +46,227 @@ def get_pose_service() -> PoseService:
     return _pose_service
 
 
-ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
-MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
+ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".webm", ".mkv"}
 
 
-@router.post("/analyze", response_model=AnalysisResponse)
-async def analyze_image(
+@router.post("/analyze", response_model=VideoAnalysisResponse)
+async def analyze_video(
     file: UploadFile,
     confidence: float = Query(0.25, ge=0.0, le=1.0, description="Confidence threshold (0-1)"),
     debug: bool = Query(False, description="Enable debug logging"),
-    show_all_classes: bool = Query(False, description="Include class IDs in response"),
 ):
-    """Upload a gym/weightlifting image and get annotated results.
+    """Upload a gym/weightlifting video and get an annotated MP4 with overlays."""
 
-    Debug Parameters:
-    - confidence: Lower this to see more detections (try 0.1-0.2)
-    - debug: Set to true to see detailed logging in server console
-    - show_all_classes: Include COCO class IDs in detection results
-    """
-
-    if file.content_type not in ALLOWED_CONTENT_TYPES:
+    # Validate by file extension (content_type is unreliable for video)
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_VIDEO_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported file type: {file.content_type}. Use JPEG, PNG, or WebP.",
+            detail=f"Unsupported video format: {ext}. Use MP4, AVI, MOV, WebM, or MKV.",
         )
 
-    raw_bytes = await file.read()
-    if len(raw_bytes) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="File too large (max 20 MB).")
+    # Stream upload to temp file (handles large files without loading into RAM)
+    tmp_fd, tmp_input_path = tempfile.mkstemp(suffix=ext)
+    try:
+        with open(tmp_fd, "wb") as tmp_in:
+            while chunk := await file.read(8 * 1024 * 1024):  # 8 MB chunks
+                tmp_in.write(chunk)
 
-    # Decode image
-    nparr = np.frombuffer(raw_bytes, np.uint8)
-    image_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if image_bgr is None:
-        raise HTTPException(status_code=400, detail="Could not decode image.")
+        start_time = time.time()
 
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        # Initialise video processor
+        result_id = uuid.uuid4().hex[:12]
+        output_filename = f"{result_id}.mp4"
+        output_path = str(RESULTS_DIR / output_filename)
+        processor = VideoProcessor(tmp_input_path, output_path)
+        metadata = processor.get_metadata()
 
-    # --- Run detection ---
-    detector = get_detection_service()
-    detections = detector.detect(
-        image_bgr,
-        confidence_threshold=confidence,
-        return_all_classes=show_all_classes,
-        debug=debug,
-    )
+        logger.info(
+            "Processing video: %d frames, %.1f fps, %dx%d, %.1fs",
+            metadata["total_frames"], metadata["fps"],
+            metadata["width"], metadata["height"],
+            metadata["duration_seconds"],
+        )
 
-    # --- Run pose estimation ---
-    poser = get_pose_service()
-    pose_data = poser.estimate(image_rgb)
+        # Initialise ML services
+        detector = get_detection_service()
+        poser = get_pose_service()
 
-    # --- Render overlays ---
-    annotated_bgr = render_overlays(image_bgr, detections, pose_data)
+        # Process every frame
+        detection_counts: dict[str, int] = {}
+        frames_with_pose = 0
 
-    # Save annotated image
-    result_id = uuid.uuid4().hex[:12]
-    out_filename = f"{result_id}.jpg"
-    out_path = UPLOAD_DIR / out_filename
-    cv2.imwrite(str(out_path), annotated_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        for frame_idx, frame_bgr in processor.frames():
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
-    return AnalysisResponse(
-        detections=detections,
-        pose=pose_data,
-        annotated_image_url=f"/uploads/{out_filename}",
+            # Detection
+            detections = detector.detect(
+                frame_bgr,
+                confidence_threshold=confidence,
+                debug=(debug and frame_idx == 0),  # debug-log first frame only
+            )
+
+            # Aggregate detection counts
+            for det in detections:
+                label = det["label"]
+                detection_counts[label] = detection_counts.get(label, 0) + 1
+
+            # Pose estimation
+            pose_data = poser.estimate(frame_rgb)
+            if pose_data is not None:
+                frames_with_pose += 1
+
+            # Render overlays in-place (frame is a fresh decode, safe to mutate)
+            annotated = render_overlays(frame_bgr, detections, pose_data, inplace=True)
+
+            # Write annotated frame to output
+            processor.write_frame(annotated)
+
+            # Log progress periodically
+            if frame_idx % 100 == 0 and frame_idx > 0:
+                logger.info("Processed %d / %d frames", frame_idx, metadata["total_frames"])
+
+        # Finalise output video (re-encode to H.264)
+        processor.finalize()
+
+        elapsed = time.time() - start_time
+        logger.info("Video processing complete in %.1fs", elapsed)
+
+        return VideoAnalysisResponse(
+            download_url=f"/uploads/results/{output_filename}",
+            fps=metadata["fps"],
+            total_frames=metadata["total_frames"],
+            duration_seconds=metadata["duration_seconds"],
+            width=metadata["width"],
+            height=metadata["height"],
+            detection_summary=detection_counts,
+            frames_with_pose=frames_with_pose,
+            processing_time_seconds=round(elapsed, 2),
+        )
+    finally:
+        # Clean up temp input file
+        Path(tmp_input_path).unlink(missing_ok=True)
+
+
+def _sse_event(event: str, data: dict) -> str:
+    """Format a server-sent event string."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+@router.post("/analyze-stream")
+async def analyze_video_stream(
+    file: UploadFile,
+    confidence: float = Query(0.25, ge=0.0, le=1.0, description="Confidence threshold (0-1)"),
+    debug: bool = Query(False, description="Enable debug logging"),
+    preview_interval: int = Query(10, ge=1, le=100, description="Send preview every N frames"),
+):
+    """Upload a video and stream annotated frame previews via SSE during processing."""
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_VIDEO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported video format: {ext}. Use MP4, AVI, MOV, WebM, or MKV.",
+        )
+
+    tmp_fd, tmp_input_path = tempfile.mkstemp(suffix=ext)
+    try:
+        with open(tmp_fd, "wb") as tmp_in:
+            while chunk := await file.read(8 * 1024 * 1024):
+                tmp_in.write(chunk)
+    except Exception:
+        Path(tmp_input_path).unlink(missing_ok=True)
+        raise
+
+    def generate():
+        processor = None
+        try:
+            start_time = time.time()
+
+            result_id = uuid.uuid4().hex[:12]
+            output_filename = f"{result_id}.mp4"
+            output_path = str(RESULTS_DIR / output_filename)
+            processor = VideoProcessor(tmp_input_path, output_path)
+            metadata = processor.get_metadata()
+
+            logger.info(
+                "SSE processing video: %d frames, %.1f fps, %dx%d",
+                metadata["total_frames"], metadata["fps"],
+                metadata["width"], metadata["height"],
+            )
+
+            detector = get_detection_service()
+            poser = get_pose_service()
+
+            detection_counts: dict[str, int] = {}
+            frames_with_pose = 0
+            total_frames = metadata["total_frames"]
+            last_event_time = time.time()
+
+            for frame_idx, frame_bgr in processor.frames():
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+                detections = detector.detect(
+                    frame_bgr,
+                    confidence_threshold=confidence,
+                    debug=(debug and frame_idx == 0),
+                )
+
+                for det in detections:
+                    label = det["label"]
+                    detection_counts[label] = detection_counts.get(label, 0) + 1
+
+                pose_data = poser.estimate(frame_rgb)
+                if pose_data is not None:
+                    frames_with_pose += 1
+
+                annotated = render_overlays(frame_bgr, detections, pose_data, inplace=True)
+                processor.write_frame(annotated)
+
+                if frame_idx % preview_interval == 0 or frame_idx == total_frames - 1:
+                    preview_b64 = encode_frame_preview(annotated)
+                    yield _sse_event("progress", {
+                        "frame_index": frame_idx,
+                        "total_frames": total_frames,
+                        "percent": round(frame_idx / max(total_frames, 1) * 100, 1),
+                        "preview": preview_b64,
+                    })
+                    last_event_time = time.time()
+                elif time.time() - last_event_time > 30:
+                    # Keepalive comment to prevent proxy/browser from closing idle SSE connection
+                    yield ": keepalive\n\n"
+                    last_event_time = time.time()
+
+            processor.finalize()
+
+            elapsed = time.time() - start_time
+            logger.info("SSE video processing complete in %.1fs", elapsed)
+
+            yield _sse_event("complete", {
+                "download_url": f"/uploads/results/{output_filename}",
+                "fps": metadata["fps"],
+                "total_frames": metadata["total_frames"],
+                "duration_seconds": metadata["duration_seconds"],
+                "width": metadata["width"],
+                "height": metadata["height"],
+                "detection_summary": detection_counts,
+                "frames_with_pose": frames_with_pose,
+                "processing_time_seconds": round(elapsed, 2),
+            })
+
+        except Exception as exc:
+            logger.exception("Error during SSE video processing")
+            yield _sse_event("error", {"detail": str(exc)})
+
+        finally:
+            Path(tmp_input_path).unlink(missing_ok=True)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )

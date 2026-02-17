@@ -6,3 +6,4 @@ numpy==1.26.4
 opencv-python-headless==4.11.0.86
 ultralytics==8.3.57
 mediapipe==0.10.21
+imageio[ffmpeg]==2.36.1

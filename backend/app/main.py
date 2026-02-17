@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(mes
 app = FastAPI(
     title="Weightlifting Scene Analyzer",
     version="1.0.0",
-    description="Upload a gym photo → get bounding boxes, labels, and stick-figure pose overlay.",
+    description="Upload a gym video → get annotated MP4 with bounding boxes, labels, and stick-figure pose overlay.",
 )
 
 app.add_middleware(
@@ -27,9 +27,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve annotated result images
+# Serve annotated result files
 uploads_dir = Path(__file__).resolve().parent.parent / "uploads"
 uploads_dir.mkdir(exist_ok=True)
+(uploads_dir / "results").mkdir(exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
 app.include_router(analysis.router, prefix="/api", tags=["analysis"])

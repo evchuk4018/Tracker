@@ -35,9 +35,10 @@ LABEL_COLORS = {
 def draw_detections(
     image: np.ndarray,
     detections: list[dict[str, Any]],
+    inplace: bool = False,
 ) -> np.ndarray:
     """Draw bounding boxes with labels and confidence scores."""
-    img = image.copy()
+    img = image if inplace else image.copy()
     for det in detections:
         x1, y1, x2, y2 = [int(v) for v in det["bbox"]]
         label = det["label"]
@@ -81,9 +82,10 @@ def draw_skeleton(
     image: np.ndarray,
     pose_data: dict[str, Any],
     visibility_threshold: float = 0.5,
+    inplace: bool = False,
 ) -> np.ndarray:
     """Draw stick-figure skeleton over the image."""
-    img = image.copy()
+    img = image if inplace else image.copy()
     keypoints = pose_data["keypoints"]
     connections = pose_data["connections"]
 
@@ -115,9 +117,10 @@ def render_overlays(
     image: np.ndarray,
     detections: list[dict[str, Any]],
     pose_data: dict[str, Any] | None,
+    inplace: bool = False,
 ) -> np.ndarray:
     """Composite all overlays onto the image."""
-    img = draw_detections(image, detections)
+    img = draw_detections(image, detections, inplace=inplace)
     if pose_data is not None:
-        img = draw_skeleton(img, pose_data)
+        img = draw_skeleton(img, pose_data, inplace=True)
     return img

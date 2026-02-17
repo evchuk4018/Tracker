@@ -5,30 +5,17 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
-class DetectionResult(BaseModel):
-    label: str
-    confidence: float
-    bbox: list[float]
-    class_id: int | None = Field(None, description="Model class ID (debug only)")
-    raw_label: str | None = Field(None, description="Original model class name before remapping")
-    proxy: bool = Field(False, description="True if detection came from a proxy class remap")
-
-
-class Keypoint(BaseModel):
-    id: int
-    name: str
-    x: float
-    y: float
-    z: float
-    visibility: float
-
-
-class PoseResult(BaseModel):
-    keypoints: list[Keypoint]
-    connections: list[list[int]]
-
-
-class AnalysisResponse(BaseModel):
-    detections: list[DetectionResult]
-    pose: PoseResult | None
-    annotated_image_url: str
+class VideoAnalysisResponse(BaseModel):
+    """Response from video analysis endpoint."""
+    download_url: str = Field(..., description="URL to download the annotated MP4")
+    fps: float = Field(..., description="Frames per second of the input video")
+    total_frames: int = Field(..., description="Total number of frames processed")
+    duration_seconds: float = Field(..., description="Duration of the video in seconds")
+    width: int = Field(..., description="Video width in pixels")
+    height: int = Field(..., description="Video height in pixels")
+    detection_summary: dict[str, int] = Field(
+        default_factory=dict,
+        description="Count of each detection label across all frames",
+    )
+    frames_with_pose: int = Field(0, description="Number of frames where pose was detected")
+    processing_time_seconds: float = Field(..., description="Total server-side processing time")
