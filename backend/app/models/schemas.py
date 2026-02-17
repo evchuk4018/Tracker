@@ -9,7 +9,9 @@ class DetectionResult(BaseModel):
     label: str
     confidence: float
     bbox: list[float]
-    class_id: int | None = Field(None, description="COCO class ID (debug only)")
+    class_id: int | None = Field(None, description="Model class ID (debug only)")
+    raw_label: str | None = Field(None, description="Original model class name before remapping")
+    proxy: bool = Field(False, description="True if detection came from a proxy class remap")
 
 
 class Keypoint(BaseModel):

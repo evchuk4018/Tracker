@@ -24,16 +24,35 @@ AVAILABLE_MODELS = {
 # Class remapping for gym equipment terminology
 # Maps model classes to user-friendly gym equipment names
 GYM_EQUIPMENT_REMAP = {
-    # Open Images V7 classes
+    # --- Direct OIV7 gym classes ---
     "Dumbbell": "dumbbell",
     "Training bench": "bench",
     "Treadmill": "treadmill",
     "Indoor rower": "rowing_machine",
+    "Stationary bicycle": "stationary_bike",
     "Sports equipment": "gym_equipment",
-    # COCO classes that might represent gym equipment
-    "sports ball": "weight_plate",  # Potential mapping for round weight plates
-    "baseball bat": "barbell",       # Potential mapping for barbell
+
+    # --- Weight plate proxies (OIV7 classes visually similar to plates) ---
+    "Plate": "weight_plate",           # dinner plate shape ≈ weight plate
+    "Tire": "weight_plate",            # rubber round ≈ bumper plate
+    "Wheel": "weight_plate",           # round with center hole
+    "Flying disc": "weight_plate",     # disc/frisbee shape
+    "Ball": "weight_plate",            # generic round object
+    "Bicycle wheel": "weight_plate",   # round with center hub
+
+    # --- Barbell proxies ---
+    "Horizontal bar": "barbell",       # gymnastics bar ≈ barbell
+    "Baseball bat": "barbell",         # rod shape (fallback)
 }
+
+# OIV7 classes used as proxies for gym equipment — accept at lower confidence
+EQUIPMENT_PROXY_CLASSES = {
+    "Plate", "Tire", "Wheel", "Flying disc", "Ball",
+    "Bicycle wheel", "Horizontal bar", "Baseball bat",
+}
+
+# Confidence floor for proxy classes
+PROXY_CONFIDENCE_THRESHOLD = 0.15
 
 LABEL_MAP: dict[int, str] = {
     0: "person",
@@ -105,18 +124,28 @@ class DetectionService:
             if debug:
                 logger.info(f"  Class {cls_id:2d} ({raw_label:20s} → {label:20s}): confidence={conf:.3f}, bbox=[{x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}]")
 
-            if conf < confidence_threshold:
+            # Proxy classes use a lower confidence floor
+            if raw_label in EQUIPMENT_PROXY_CLASSES:
+                effective_threshold = min(confidence_threshold, PROXY_CONFIDENCE_THRESHOLD)
+            else:
+                effective_threshold = confidence_threshold
+
+            if conf < effective_threshold:
                 filtered_count += 1
                 continue
+
+            is_proxy = raw_label in EQUIPMENT_PROXY_CLASSES
 
             detection = {
                 "label": label,
                 "confidence": round(conf, 3),
                 "bbox": [round(v, 1) for v in [x1, y1, x2, y2]],
+                "proxy": is_proxy,
             }
 
             if return_all_classes or debug:
                 detection["class_id"] = cls_id
+                detection["raw_label"] = raw_label
 
             detections.append(detection)
 

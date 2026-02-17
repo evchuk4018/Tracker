@@ -13,27 +13,22 @@ COLOR_PERSON = (255, 200, 0)       # cyan-ish for person bbox
 COLOR_SKELETON = (0, 140, 255)     # orange for skeleton lines
 COLOR_JOINT = (0, 0, 255)          # red for joints
 COLOR_TEXT_BG = (0, 0, 0)
-COLOR_SPORTS_BALL = (0, 165, 255)  # orange - for "sports ball" (class 32, potential weight plates!)
-COLOR_BAT = (255, 0, 255)          # magenta - for "baseball bat" (class 34, potential barbell!)
 COLOR_DUMBBELL = (0, 255, 255)     # yellow - for dumbbells
 COLOR_BARBELL = (255, 0, 255)      # magenta - for barbells
 COLOR_WEIGHT_PLATE = (0, 140, 255) # orange - for weight plates
 COLOR_BENCH = (255, 128, 0)        # blue - for benches
 
-# Map COCO/OIV7 class IDs to colors for gym-relevant objects
-CLASS_COLORS = {
-    0: COLOR_PERSON,           # person
-    32: COLOR_SPORTS_BALL,     # sports ball → likely weight plates
-    34: COLOR_BAT,             # baseball bat → likely barbell
-}
-
-# Map label names to colors (for remapped labels)
+# Map label names to colors (model-agnostic, works with any YOLO backend)
 LABEL_COLORS = {
     "person": COLOR_PERSON,
     "dumbbell": COLOR_DUMBBELL,
     "barbell": COLOR_BARBELL,
     "weight_plate": COLOR_WEIGHT_PLATE,
     "bench": COLOR_BENCH,
+    "gym_equipment": COLOR_BBOX,
+    "treadmill": (128, 128, 0),
+    "rowing_machine": (128, 128, 0),
+    "stationary_bike": (128, 128, 0),
 }
 
 
@@ -49,11 +44,12 @@ def draw_detections(
         conf = det["confidence"]
         class_id = det.get("class_id")
 
-        # Choose color based on class ID if available, otherwise use label name
-        if class_id is not None:
-            color = CLASS_COLORS.get(class_id, LABEL_COLORS.get(label, COLOR_BBOX))
-        else:
-            color = LABEL_COLORS.get(label, COLOR_PERSON if label == "person" else COLOR_BBOX)
+        # Choose color based on label name
+        color = LABEL_COLORS.get(label, COLOR_BBOX)
+
+        # Proxy detections get thinner border to distinguish them
+        is_proxy = det.get("proxy", False)
+        thickness = 2 if is_proxy else 3
 
         # Enhanced label showing class ID when in debug mode
         if class_id is not None:
@@ -61,8 +57,7 @@ def draw_detections(
         else:
             text = f"{label} {conf:.0%}"
 
-        # Draw thicker box for better visibility
-        cv2.rectangle(img, (x1, y1), (x2, y2), color, 3)
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness)
 
         # Draw label background and text
         (tw, th), _ = cv2.getTextSize(

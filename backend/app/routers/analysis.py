@@ -48,7 +48,7 @@ MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 @router.post("/analyze", response_model=AnalysisResponse)
 async def analyze_image(
     file: UploadFile,
-    confidence: float = Query(0.35, ge=0.0, le=1.0, description="Confidence threshold (0-1)"),
+    confidence: float = Query(0.25, ge=0.0, le=1.0, description="Confidence threshold (0-1)"),
     debug: bool = Query(False, description="Enable debug logging"),
     show_all_classes: bool = Query(False, description="Include class IDs in response"),
 ):
