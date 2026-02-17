@@ -1,0 +1,19 @@
+# Model weights (download at runtime)
+*.pt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Uploads
+uploads/
+
+# Node
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/

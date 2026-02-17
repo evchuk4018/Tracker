@@ -9,7 +9,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException, UploadFile, Query
 
 from app.models.schemas import AnalysisResponse
 from app.services.detection import DetectionService
@@ -46,8 +46,19 @@ MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 
 
 @router.post("/analyze", response_model=AnalysisResponse)
-async def analyze_image(file: UploadFile):
-    """Upload a gym/weightlifting image and get annotated results."""
+async def analyze_image(
+    file: UploadFile,
+    confidence: float = Query(0.35, ge=0.0, le=1.0, description="Confidence threshold (0-1)"),
+    debug: bool = Query(False, description="Enable debug logging"),
+    show_all_classes: bool = Query(False, description="Include class IDs in response"),
+):
+    """Upload a gym/weightlifting image and get annotated results.
+
+    Debug Parameters:
+    - confidence: Lower this to see more detections (try 0.1-0.2)
+    - debug: Set to true to see detailed logging in server console
+    - show_all_classes: Include COCO class IDs in detection results
+    """
 
     if file.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
@@ -69,7 +80,12 @@ async def analyze_image(file: UploadFile):
 
     # --- Run detection ---
     detector = get_detection_service()
-    detections = detector.detect(image_bgr)
+    detections = detector.detect(
+        image_bgr,
+        confidence_threshold=confidence,
+        return_all_classes=show_all_classes,
+        debug=debug,
+    )
 
     # --- Run pose estimation ---
     poser = get_pose_service()

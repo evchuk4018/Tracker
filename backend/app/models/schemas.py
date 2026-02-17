@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class DetectionResult(BaseModel):
     label: str
     confidence: float
     bbox: list[float]
+    class_id: int | None = Field(None, description="COCO class ID (debug only)")
 
 
 class Keypoint(BaseModel):
