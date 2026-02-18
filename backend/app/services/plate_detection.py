@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 def compute_iou(box_a: list[float], box_b: list[float]) -> float:
@@ -358,6 +361,11 @@ class ColorPlateDetector:
         s_center = int(sample_hsv[0, 0, 1])
         v_center = int(sample_hsv[0, 0, 2])
 
+        logger.info(
+            "[ColorPlateDetector] input RGB=(%d,%d,%d) -> HSV center=(%d,%d,%d)",
+            r, g, b, h_center, s_center, v_center,
+        )
+
         # Saturation / value floors respect the sampled values so very dark or
         # desaturated plates still get a sensible range.
         s_lo = max(30, min(s_center - 50, sat_floor))
@@ -387,6 +395,11 @@ class ColorPlateDetector:
             self._ranges = [
                 (np.array([0, 0, v_lo]), np.array([179, 60, 255])),
             ]
+
+        logger.info(
+            "[ColorPlateDetector] HSV ranges: %s",
+            [(lo.tolist(), hi.tolist()) for lo, hi in self._ranges],
+        )
 
         # Morphological kernels.
         self._close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))

@@ -150,6 +150,7 @@ function App() {
             formData.append('plate_r', plateColor.r);
             formData.append('plate_g', plateColor.g);
             formData.append('plate_b', plateColor.b);
+            console.log('[color-picker] sending plate color (chunked):', plateColor);
           }
 
           setProgress({
@@ -217,6 +218,7 @@ function App() {
         const streamUrl = plateColor && plateColor !== 'skip'
           ? `${API_BASE}/api/analyze-stream?plate_r=${plateColor.r}&plate_g=${plateColor.g}&plate_b=${plateColor.b}`
           : `${API_BASE}/api/analyze-stream`;
+        console.log('[color-picker] sending plate color (stream):', plateColor, 'url:', streamUrl);
         res = await fetch(streamUrl, {
           method: 'POST',
           body: formData,
@@ -345,9 +347,34 @@ function App() {
                       const canvas = calibCanvasRef.current;
                       if (!canvas) return;
                       const rect = e.currentTarget.getBoundingClientRect();
-                      const x = Math.round((e.clientX - rect.left) * (canvas.width / rect.width));
-                      const y = Math.round((e.clientY - rect.top) * (canvas.height / rect.height));
+
+                      // Account for object-fit:contain letterboxing
+                      const imgAspect = canvas.width / canvas.height;
+                      const boxAspect = rect.width / rect.height;
+                      let renderedW, renderedH, padX, padY;
+                      if (imgAspect > boxAspect) {
+                        renderedW = rect.width;
+                        renderedH = rect.width / imgAspect;
+                        padX = 0;
+                        padY = (rect.height - renderedH) / 2;
+                      } else {
+                        renderedH = rect.height;
+                        renderedW = rect.height * imgAspect;
+                        padX = (rect.width - renderedW) / 2;
+                        padY = 0;
+                      }
+
+                      const x = Math.round(((e.clientX - rect.left - padX) / renderedW) * canvas.width);
+                      const y = Math.round(((e.clientY - rect.top - padY) / renderedH) * canvas.height);
+
+                      // Ignore clicks in the letterbox padding
+                      if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) return;
+
                       const [r, g, b] = canvas.getContext('2d').getImageData(x, y, 1, 1).data;
+                      console.log('[color-picker] click pos:', { clientX: e.clientX, clientY: e.clientY },
+                        'rect:', { left: rect.left, top: rect.top, w: rect.width, h: rect.height },
+                        'rendered:', { renderedW, renderedH, padX, padY },
+                        'canvas px:', { x, y }, 'rgb:', { r, g, b });
                       setPlateColor({ r, g, b });
                     }}
                   />
