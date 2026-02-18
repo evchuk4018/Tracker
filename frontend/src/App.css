@@ -318,3 +318,68 @@
   border-color: var(--accent);
   color: var(--text);
 }
+
+/* Color calibration section */
+.calib-section {
+  margin-top: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.calib-instructions {
+  padding: 0.75rem 1rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+}
+.calib-frame {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  cursor: crosshair;
+  background: #000;
+}
+.calib-confirm {
+  margin-top: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 0.85rem;
+}
+.calib-skipped {
+  color: var(--text-muted);
+}
+.color-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.repick-btn,
+.skip-calib-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 0.3rem 0.85rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.repick-btn:hover,
+.skip-calib-btn:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}

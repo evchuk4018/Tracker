@@ -11,6 +11,8 @@ from typing import Any
 import numpy as np
 from ultralytics import YOLO
 
+from app.services.plate_detection import CVPlateDetector, ColorPlateDetector, compute_iou
+
 logger = logging.getLogger(__name__)
 
 # Available pre-trained models
@@ -82,6 +84,9 @@ class DetectionService:
         logger.info("Loading YOLO model: %s", model_path)
         self.model = YOLO(model_path)
         self.model_path = model_path
+        self._cv_plate_detector = CVPlateDetector()
+        self._color_plate_detector: ColorPlateDetector | None = None
+        self._color_plate_rgb: tuple[int, int, int] | None = None
 
     def detect(
         self,
@@ -89,6 +94,7 @@ class DetectionService:
         confidence_threshold: float = 0.35,
         return_all_classes: bool = False,
         debug: bool = False,
+        plate_rgb: tuple[int, int, int] | None = None,
     ) -> list[dict[str, Any]]:
         """Run detection and return list of detections.
 
@@ -151,6 +157,33 @@ class DetectionService:
 
         if debug:
             logger.info(f"Filtered out {filtered_count} detections below threshold {confidence_threshold}")
-            logger.info(f"Returning {len(detections)} detections")
+            logger.info(f"Returning {len(detections)} YOLO detections")
+
+        # --- Plate detection: color-based (precise) or shape-based (fallback) ---
+        if plate_rgb is not None:
+            # Rebuild ColorPlateDetector only when the sampled colour changes.
+            if plate_rgb != self._color_plate_rgb:
+                self._color_plate_detector = ColorPlateDetector(*plate_rgb)
+                self._color_plate_rgb = plate_rgb
+            plate_dets = self._color_plate_detector.detect(image)  # type: ignore[union-attr]
+        else:
+            plate_dets = self._cv_plate_detector.detect(image)
+
+        added = 0
+        for pd in plate_dets:
+            overlaps_yolo = any(
+                compute_iou(pd["bbox"], yolo_det["bbox"]) > 0.3
+                for yolo_det in detections
+            )
+            if not overlaps_yolo:
+                detections.append(pd)
+                added += 1
+
+        if debug:
+            mode = "color" if plate_rgb is not None else "shape"
+            logger.info(
+                f"Plate detector ({mode}) found {len(plate_dets)} candidates, "
+                f"{added} added after dedup with YOLO"
+            )
 
         return detections

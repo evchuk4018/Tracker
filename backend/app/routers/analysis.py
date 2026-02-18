@@ -81,6 +81,9 @@ class ProcessingSession:
         confidence: float,
         debug: bool,
         preview_interval: int,
+        plate_r: int | None = None,
+        plate_g: int | None = None,
+        plate_b: int | None = None,
     ) -> None:
         self.session_id = session_id
         self.ext = ext
@@ -89,6 +92,7 @@ class ProcessingSession:
         self.confidence = confidence
         self.debug = debug
         self.preview_interval = preview_interval
+        self.plate_rgb = (plate_r, plate_g, plate_b) if plate_r is not None else None
         self.start_time = time.time()
 
         self.session_dir = CHUNKS_DIR / session_id
@@ -191,6 +195,7 @@ class ProcessingSession:
                     frame_bgr,
                     confidence_threshold=self.confidence,
                     debug=(self.debug and frame_idx == 0),
+                    plate_rgb=self.plate_rgb,
                 )
                 for det in detections:
                     label = det["label"]
@@ -285,6 +290,9 @@ async def analyze_video(
     file: UploadFile,
     confidence: float = Query(0.25, ge=0.0, le=1.0, description="Confidence threshold (0-1)"),
     debug: bool = Query(False, description="Enable debug logging"),
+    plate_r: int | None = Query(None, ge=0, le=255),
+    plate_g: int | None = Query(None, ge=0, le=255),
+    plate_b: int | None = Query(None, ge=0, le=255),
 ):
     """Upload a gym/weightlifting video and get an annotated MP4 with overlays."""
 
@@ -335,6 +343,7 @@ async def analyze_video(
                 frame_bgr,
                 confidence_threshold=confidence,
                 debug=(debug and frame_idx == 0),  # debug-log first frame only
+                plate_rgb=(plate_r, plate_g, plate_b) if plate_r is not None else None,
             )
 
             # Aggregate detection counts
@@ -390,6 +399,9 @@ async def analyze_video_stream(
     confidence: float = Query(0.25, ge=0.0, le=1.0, description="Confidence threshold (0-1)"),
     debug: bool = Query(False, description="Enable debug logging"),
     preview_interval: int = Query(10, ge=1, le=100, description="Send preview every N frames"),
+    plate_r: int | None = Query(None, ge=0, le=255),
+    plate_g: int | None = Query(None, ge=0, le=255),
+    plate_b: int | None = Query(None, ge=0, le=255),
 ):
     """Upload a video and stream annotated frame previews via SSE during processing."""
 
@@ -441,6 +453,7 @@ async def analyze_video_stream(
                     frame_bgr,
                     confidence_threshold=confidence,
                     debug=(debug and frame_idx == 0),
+                    plate_rgb=(plate_r, plate_g, plate_b) if plate_r is not None else None,
                 )
 
                 for det in detections:
@@ -513,6 +526,9 @@ async def upload_chunk(
     confidence: float = Form(0.25),
     debug: bool = Form(False),
     preview_interval: int = Form(10),
+    plate_r: int | None = Form(None),
+    plate_g: int | None = Form(None),
+    plate_b: int | None = Form(None),
 ):
     """Receive one chunk of a large file upload.
 
@@ -550,6 +566,9 @@ async def upload_chunk(
             confidence=confidence,
             debug=debug,
             preview_interval=preview_interval,
+            plate_r=plate_r,
+            plate_g=plate_g,
+            plate_b=plate_b,
         )
         with _sessions_lock:
             _active_sessions[session_id] = session
@@ -582,6 +601,9 @@ async def analyze_assembled(
     confidence: float = Query(0.25, ge=0.0, le=1.0),
     debug: bool = Query(False),
     preview_interval: int = Query(10, ge=1, le=100),
+    plate_r: int | None = Query(None, ge=0, le=255),
+    plate_g: int | None = Query(None, ge=0, le=255),
+    plate_b: int | None = Query(None, ge=0, le=255),
 ):
     """Run analysis on a previously assembled chunked upload, streaming progress via SSE."""
     if not _SESSION_ID_RE.match(session_id):
@@ -625,6 +647,7 @@ async def analyze_assembled(
                     frame_bgr,
                     confidence_threshold=confidence,
                     debug=(debug and frame_idx == 0),
+                    plate_rgb=(plate_r, plate_g, plate_b) if plate_r is not None else None,
                 )
 
                 for det in detections:

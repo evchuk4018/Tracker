@@ -20,6 +20,9 @@ function App() {
   const [dragOver, setDragOver] = useState(false);
   const [progress, setProgress] = useState(null);
   const fileInputRef = useRef(null);
+  const calibCanvasRef = useRef(null);
+  const [calibFrame, setCalibFrame] = useState(null);
+  const [plateColor, setPlateColor] = useState(null);
 
   const handleFile = useCallback((f) => {
     if (!f) return;
@@ -38,6 +41,26 @@ function App() {
     setVideoPreview(URL.createObjectURL(f));
     setError(null);
     setResult(null);
+    setCalibFrame(null);
+    setPlateColor(null);
+    calibCanvasRef.current = null;
+
+    // Extract first frame client-side for color calibration.
+    const vid = document.createElement('video');
+    const objUrl = URL.createObjectURL(f);
+    vid.src = objUrl;
+    vid.currentTime = 0.05;
+    vid.onseeked = () => {
+      const c = document.createElement('canvas');
+      c.width = vid.videoWidth;
+      c.height = vid.videoHeight;
+      c.getContext('2d').drawImage(vid, 0, 0);
+      setCalibFrame(c.toDataURL('image/jpeg', 0.85));
+      calibCanvasRef.current = c;
+      URL.revokeObjectURL(objUrl);
+    };
+    vid.onerror = () => URL.revokeObjectURL(objUrl);
+    vid.load();
   }, []);
 
   const onDrop = useCallback(
@@ -123,6 +146,11 @@ function App() {
           formData.append('total_chunks', totalChunks);
           formData.append('ext', ext);
           formData.append('file', chunk, 'chunk.bin');
+          if (plateColor && plateColor !== 'skip') {
+            formData.append('plate_r', plateColor.r);
+            formData.append('plate_g', plateColor.g);
+            formData.append('plate_b', plateColor.b);
+          }
 
           setProgress({
             phase: 'uploading',
@@ -186,7 +214,10 @@ function App() {
         // --- Direct upload (small files) ---
         const formData = new FormData();
         formData.append('file', file);
-        res = await fetch(`${API_BASE}/api/analyze-stream`, {
+        const streamUrl = plateColor && plateColor !== 'skip'
+          ? `${API_BASE}/api/analyze-stream?plate_r=${plateColor.r}&plate_g=${plateColor.g}&plate_b=${plateColor.b}`
+          : `${API_BASE}/api/analyze-stream`;
+        res = await fetch(streamUrl, {
           method: 'POST',
           body: formData,
         });
@@ -243,6 +274,9 @@ function App() {
     setResult(null);
     setError(null);
     setProgress(null);
+    setCalibFrame(null);
+    setPlateColor(null);
+    calibCanvasRef.current = null;
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -276,19 +310,68 @@ function App() {
           </div>
 
           {file && videoPreview && (
-            <div className="preview-strip">
-              <video src={videoPreview} className="preview-thumb" muted />
-              <div className="preview-info">
-                <div className="name">{file.name}</div>
-                <div className="size">{formatBytes(file.size)}</div>
+            <>
+              <div className="preview-strip">
+                <video src={videoPreview} className="preview-thumb" muted />
+                <div className="preview-info">
+                  <div className="name">{file.name}</div>
+                  <div className="size">{formatBytes(file.size)}</div>
+                </div>
+                <button
+                  className="analyze-btn"
+                  onClick={analyze}
+                  disabled={loading || (calibFrame && !plateColor)}
+                  title={calibFrame && !plateColor ? 'Click a plate in the preview below first' : ''}
+                >
+                  Process Video
+                </button>
+                <button className="remove-btn" onClick={reset} title="Remove">
+                  &times;
+                </button>
               </div>
-              <button className="analyze-btn" onClick={analyze} disabled={loading}>
-                Process Video
-              </button>
-              <button className="remove-btn" onClick={reset} title="Remove">
-                &times;
-              </button>
-            </div>
+
+              {/* Color calibration — click on a plate to pick target hue */}
+              {calibFrame && !plateColor && (
+                <div className="calib-section">
+                  <p className="calib-instructions">
+                    Click directly on a plate in the frame below to set the detection color.
+                    &nbsp;<button className="skip-calib-btn" onClick={() => setPlateColor('skip')}>Skip (use shape detection)</button>
+                  </p>
+                  <img
+                    src={calibFrame}
+                    alt="First frame — click a plate"
+                    className="calib-frame"
+                    onClick={(e) => {
+                      const canvas = calibCanvasRef.current;
+                      if (!canvas) return;
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const x = Math.round((e.clientX - rect.left) * (canvas.width / rect.width));
+                      const y = Math.round((e.clientY - rect.top) * (canvas.height / rect.height));
+                      const [r, g, b] = canvas.getContext('2d').getImageData(x, y, 1, 1).data;
+                      setPlateColor({ r, g, b });
+                    }}
+                  />
+                </div>
+              )}
+
+              {plateColor && plateColor !== 'skip' && (
+                <div className="calib-confirm">
+                  <div
+                    className="color-swatch"
+                    style={{ background: `rgb(${plateColor.r},${plateColor.g},${plateColor.b})` }}
+                  />
+                  <span>Plate color set — detection will target this hue</span>
+                  <button className="repick-btn" onClick={() => setPlateColor(null)}>Re-pick</button>
+                </div>
+              )}
+
+              {plateColor === 'skip' && (
+                <div className="calib-confirm calib-skipped">
+                  <span>Using shape detection (no color calibration)</span>
+                  <button className="repick-btn" onClick={() => setPlateColor(null)}>Calibrate instead</button>
+                </div>
+              )}
+            </>
           )}
         </>
       )}
