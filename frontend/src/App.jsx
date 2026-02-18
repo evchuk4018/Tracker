@@ -66,11 +66,53 @@ function App() {
       let res;
 
       if (file.size > CHUNK_SIZE) {
-        // --- Chunked upload (large files) ---
+        // --- Chunked upload with background processing ---
+        // Processing starts on the server as soon as chunk 0 arrives.
+        // We finish all uploads first, then connect to the SSE stream to
+        // collect results (processing is already underway by then).
         const sessionId = crypto.randomUUID();
         const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
         const ext = '.' + file.name.split('.').pop().toLowerCase();
 
+        // Helper: read SSE events from a fetch Response, returns final result
+        const readSSE = async (sseRes) => {
+          const reader = sseRes.body.getReader();
+          const dec = new TextDecoder();
+          let buf = '';
+          let sseResult = null;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buf += dec.decode(value, { stream: true });
+            const parts = buf.split('\n\n');
+            buf = parts.pop() || '';
+
+            for (const block of parts) {
+              if (!block.trim()) continue;
+              let eventType = 'message';
+              let dataStr = '';
+              for (const line of block.split('\n')) {
+                if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+                else if (line.startsWith('data: ')) dataStr = line.slice(6);
+              }
+              if (!dataStr) continue;
+              const data = JSON.parse(dataStr);
+
+              if (eventType === 'progress') {
+                setProgress({ phase: 'processing', processing: data });
+              } else if (eventType === 'complete') {
+                sseResult = data;
+              } else if (eventType === 'error') {
+                throw new Error(data.detail || 'Processing failed on server');
+              }
+            }
+          }
+          return sseResult;
+        };
+
+        // 1. Upload all chunks (server starts processing on chunk 0)
         for (let i = 0; i < totalChunks; i++) {
           const start = i * CHUNK_SIZE;
           const chunk = file.slice(start, start + CHUNK_SIZE);
@@ -111,12 +153,35 @@ function App() {
             const body = await uploadRes.json().catch(() => null);
             throw new Error(body?.detail || `Upload error (${uploadRes.status})`);
           }
+
+          // Check if server confirmed streaming is active
+          const uploadData = await uploadRes.json().catch(() => ({}));
+          if (uploadData.streaming) {
+            // Processing already underway on server — note the phase shift
+            setProgress(prev => prev?.phase === 'uploading' ? { ...prev, processingStarted: true } : prev);
+          }
         }
 
-        setProgress({ phase: 'assembling' });
-        res = await fetch(`${API_BASE}/api/analyze-assembled/${sessionId}`, {
-          method: 'POST',
-        });
+        // 2. All uploads done — connect to SSE stream (processing already running)
+        setProgress({ phase: 'processing', processing: null });
+
+        const sseRes = await fetch(`${API_BASE}/api/stream-progress/${sessionId}`);
+
+        if (sseRes.ok) {
+          const sseResult = await readSSE(sseRes);
+          setResult(sseResult);
+        } else {
+          // Fallback: stream-progress unavailable, use legacy endpoint
+          res = await fetch(`${API_BASE}/api/analyze-assembled/${sessionId}`, {
+            method: 'POST',
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            throw new Error(body?.detail || `Server error (${res.status})`);
+          }
+          const fallbackResult = await readSSE(res);
+          setResult(fallbackResult);
+        }
       } else {
         // --- Direct upload (small files) ---
         const formData = new FormData();
@@ -125,43 +190,43 @@ function App() {
           method: 'POST',
           body: formData,
         });
-      }
 
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.detail || `Server error (${res.status})`);
-      }
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.detail || `Server error (${res.status})`);
+        }
 
-      // Read SSE stream
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+        // Read SSE stream
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split('\n\n');
-        buffer = events.pop() || '';
+          buffer += decoder.decode(value, { stream: true });
+          const events = buffer.split('\n\n');
+          buffer = events.pop() || '';
 
-        for (const eventBlock of events) {
-          if (!eventBlock.trim()) continue;
+          for (const eventBlock of events) {
+            if (!eventBlock.trim()) continue;
 
-          let eventType = 'message';
-          let dataStr = '';
+            let eventType = 'message';
+            let dataStr = '';
 
-          for (const line of eventBlock.split('\n')) {
-            if (line.startsWith('event: ')) eventType = line.slice(7).trim();
-            else if (line.startsWith('data: ')) dataStr = line.slice(6);
+            for (const line of eventBlock.split('\n')) {
+              if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+              else if (line.startsWith('data: ')) dataStr = line.slice(6);
+            }
+
+            if (!dataStr) continue;
+            const data = JSON.parse(dataStr);
+
+            if (eventType === 'progress') setProgress({ phase: 'processing', ...data });
+            else if (eventType === 'complete') setResult(data);
+            else if (eventType === 'error') throw new Error(data.detail || 'Processing failed on server');
           }
-
-          if (!dataStr) continue;
-          const data = JSON.parse(dataStr);
-
-          if (eventType === 'progress') setProgress({ phase: 'processing', ...data });
-          else if (eventType === 'complete') setResult(data);
-          else if (eventType === 'error') throw new Error(data.detail || 'Processing failed on server');
         }
       }
     } catch (err) {
@@ -230,6 +295,7 @@ function App() {
 
       {loading && (
         <div className="processing">
+          {/* Upload progress (shown during 'uploading' phase) */}
           {progress?.phase === 'uploading' && (
             <>
               <div className="spinner" />
@@ -242,12 +308,35 @@ function App() {
               </div>
             </>
           )}
-          {progress?.phase === 'assembling' && (
+          {/* Processing preview (shown during 'processing' phase, chunked upload path) */}
+          {progress?.phase === 'processing' && progress?.processing?.preview && (
             <>
-              <div className="spinner" />
-              <p>Assembling file on server...</p>
+              <div className="preview-container">
+                <img
+                  src={`data:image/jpeg;base64,${progress.processing.preview}`}
+                  alt={`Processing frame ${progress.processing.frame_index}`}
+                  className="live-preview"
+                />
+              </div>
+              <div className="progress-section">
+                {progress.processing.percent != null ? (
+                  <>
+                    <div className="progress-bar-track">
+                      <div className="progress-bar-fill" style={{ width: `${progress.processing.percent}%` }} />
+                    </div>
+                    <div className="progress-text">
+                      Frame {progress.processing.frame_index} of {progress.processing.total_frames} ({progress.processing.percent}%)
+                    </div>
+                  </>
+                ) : (
+                  <div className="progress-text">
+                    Processing frame {progress.processing.frame_index}...
+                  </div>
+                )}
+              </div>
             </>
           )}
+          {/* Legacy processing view (direct upload / fallback) */}
           {(progress?.phase === 'processing' && progress.preview) && (
             <>
               <div className="preview-container">

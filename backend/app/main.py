@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,3 +41,25 @@ app.include_router(analysis.router, prefix="/api", tags=["analysis"])
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.on_event("startup")
+async def _start_session_reaper():
+    """Periodically clean up abandoned streaming processing sessions."""
+
+    async def _reaper():
+        while True:
+            await asyncio.sleep(60)
+            now = time.time()
+            stale = []
+            with analysis._sessions_lock:
+                for _sid, session in analysis._active_sessions.items():
+                    if now - session.start_time > 600:  # 10 minutes
+                        stale.append(session)
+            for session in stale:
+                logging.getLogger(__name__).warning(
+                    "Reaping stale session %s", session.session_id,
+                )
+                session.cleanup()
+
+    asyncio.create_task(_reaper())
