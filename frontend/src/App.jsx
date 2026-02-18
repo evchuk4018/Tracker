@@ -2,6 +2,8 @@ import { useState, useRef, useCallback } from 'react';
 import './App.css';
 
 const API_BASE = '';
+const CHUNK_SIZE = 1 * 1024 * 1024; // 1 MB — small enough for Codespaces proxy
+const CHUNK_TIMEOUT_MS = 30_000;     // 30 s per chunk before giving up
 
 function formatBytes(bytes) {
   if (bytes < 1024) return bytes + ' B';
@@ -60,20 +62,77 @@ function App() {
     setError(null);
     setProgress(null);
 
-    const formData = new FormData();
-    formData.append('file', file);
-
     try {
-      const res = await fetch(`${API_BASE}/api/analyze-stream`, {
-        method: 'POST',
-        body: formData,
-      });
+      let res;
+
+      if (file.size > CHUNK_SIZE) {
+        // --- Chunked upload (large files) ---
+        const sessionId = crypto.randomUUID();
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        const ext = '.' + file.name.split('.').pop().toLowerCase();
+
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE;
+          const chunk = file.slice(start, start + CHUNK_SIZE);
+
+          const formData = new FormData();
+          formData.append('session_id', sessionId);
+          formData.append('chunk_index', i);
+          formData.append('total_chunks', totalChunks);
+          formData.append('ext', ext);
+          formData.append('file', chunk, 'chunk.bin');
+
+          setProgress({
+            phase: 'uploading',
+            chunk: i + 1,
+            totalChunks,
+            percent: Math.round(((i + 1) / totalChunks) * 100),
+          });
+
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), CHUNK_TIMEOUT_MS);
+          let uploadRes;
+          try {
+            uploadRes = await fetch(`${API_BASE}/api/upload-chunk`, {
+              method: 'POST',
+              body: formData,
+              signal: controller.signal,
+            });
+          } catch (fetchErr) {
+            if (fetchErr.name === 'AbortError') {
+              throw new Error(`Chunk ${i + 1} timed out — network too slow or proxy blocking request`);
+            }
+            throw fetchErr;
+          } finally {
+            clearTimeout(timer);
+          }
+
+          if (!uploadRes.ok) {
+            const body = await uploadRes.json().catch(() => null);
+            throw new Error(body?.detail || `Upload error (${uploadRes.status})`);
+          }
+        }
+
+        setProgress({ phase: 'assembling' });
+        res = await fetch(`${API_BASE}/api/analyze-assembled/${sessionId}`, {
+          method: 'POST',
+        });
+      } else {
+        // --- Direct upload (small files) ---
+        const formData = new FormData();
+        formData.append('file', file);
+        res = await fetch(`${API_BASE}/api/analyze-stream`, {
+          method: 'POST',
+          body: formData,
+        });
+      }
 
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.detail || `Server error (${res.status})`);
       }
 
+      // Read SSE stream
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -83,7 +142,6 @@ function App() {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-
         const events = buffer.split('\n\n');
         buffer = events.pop() || '';
 
@@ -94,23 +152,16 @@ function App() {
           let dataStr = '';
 
           for (const line of eventBlock.split('\n')) {
-            if (line.startsWith('event: ')) {
-              eventType = line.slice(7).trim();
-            } else if (line.startsWith('data: ')) {
-              dataStr = line.slice(6);
-            }
+            if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+            else if (line.startsWith('data: ')) dataStr = line.slice(6);
           }
 
           if (!dataStr) continue;
           const data = JSON.parse(dataStr);
 
-          if (eventType === 'progress') {
-            setProgress(data);
-          } else if (eventType === 'complete') {
-            setResult(data);
-          } else if (eventType === 'error') {
-            throw new Error(data.detail || 'Processing failed on server');
-          }
+          if (eventType === 'progress') setProgress({ phase: 'processing', ...data });
+          else if (eventType === 'complete') setResult(data);
+          else if (eventType === 'error') throw new Error(data.detail || 'Processing failed on server');
         }
       }
     } catch (err) {
@@ -179,7 +230,25 @@ function App() {
 
       {loading && (
         <div className="processing">
-          {progress && progress.preview ? (
+          {progress?.phase === 'uploading' && (
+            <>
+              <div className="spinner" />
+              <p>Uploading chunk {progress.chunk} of {progress.totalChunks}...</p>
+              <div className="progress-section">
+                <div className="progress-bar-track">
+                  <div className="progress-bar-fill" style={{ width: `${progress.percent}%` }} />
+                </div>
+                <div className="progress-text">{progress.percent}% uploaded</div>
+              </div>
+            </>
+          )}
+          {progress?.phase === 'assembling' && (
+            <>
+              <div className="spinner" />
+              <p>Assembling file on server...</p>
+            </>
+          )}
+          {(progress?.phase === 'processing' && progress.preview) && (
             <>
               <div className="preview-container">
                 <img
@@ -190,17 +259,15 @@ function App() {
               </div>
               <div className="progress-section">
                 <div className="progress-bar-track">
-                  <div
-                    className="progress-bar-fill"
-                    style={{ width: `${progress.percent}%` }}
-                  />
+                  <div className="progress-bar-fill" style={{ width: `${progress.percent}%` }} />
                 </div>
                 <div className="progress-text">
                   Frame {progress.frame_index} of {progress.total_frames} ({progress.percent}%)
                 </div>
               </div>
             </>
-          ) : (
+          )}
+          {!progress && (
             <>
               <div className="spinner" />
               <p>Uploading and initializing...</p>

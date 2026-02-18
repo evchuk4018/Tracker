@@ -10,9 +10,11 @@ import uuid
 from pathlib import Path
 
 import json
+import re
+import shutil
 
 import cv2
-from fastapi import APIRouter, HTTPException, UploadFile, Query
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Query
 from fastapi.responses import StreamingResponse
 
 from app.models.schemas import VideoAnalysisResponse
@@ -26,6 +28,11 @@ router = APIRouter()
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent.parent / "uploads" / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+CHUNKS_DIR = Path(__file__).resolve().parent.parent.parent / "uploads" / "chunks"
+CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+
+_SESSION_ID_RE = re.compile(r'^[a-zA-Z0-9\-]{1,64}$')
 
 # Module-level singletons (initialised lazily)
 _detection_service: DetectionService | None = None
@@ -260,6 +267,152 @@ async def analyze_video_stream(
 
         finally:
             Path(tmp_input_path).unlink(missing_ok=True)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/upload-chunk")
+async def upload_chunk(
+    session_id: str = Form(...),
+    chunk_index: int = Form(...),
+    total_chunks: int = Form(...),
+    ext: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Receive one chunk of a large file upload. Assembles the full file when all chunks arrive."""
+    if not _SESSION_ID_RE.match(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+    if not re.match(r'^\.[a-zA-Z0-9]{1,10}$', ext):
+        raise HTTPException(status_code=400, detail="Invalid extension")
+
+    session_dir = CHUNKS_DIR / session_id
+    session_dir.mkdir(exist_ok=True)
+
+    chunk_path = session_dir / f"{chunk_index:06d}.bin"
+    with open(chunk_path, "wb") as f:
+        while data := await file.read(1024 * 1024):
+            f.write(data)
+
+    received = len(list(session_dir.glob("*.bin")))
+    assembled = received == total_chunks
+
+    if assembled:
+        assembled_path = session_dir / f"assembled{ext}"
+        with open(assembled_path, "wb") as out:
+            for i in range(total_chunks):
+                cp = session_dir / f"{i:06d}.bin"
+                out.write(cp.read_bytes())
+                cp.unlink()
+
+    return {"session_id": session_id, "chunks_received": received, "assembled": assembled}
+
+
+@router.post("/analyze-assembled/{session_id}")
+async def analyze_assembled(
+    session_id: str,
+    confidence: float = Query(0.25, ge=0.0, le=1.0),
+    debug: bool = Query(False),
+    preview_interval: int = Query(10, ge=1, le=100),
+):
+    """Run analysis on a previously assembled chunked upload, streaming progress via SSE."""
+    if not _SESSION_ID_RE.match(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+
+    session_dir = CHUNKS_DIR / session_id
+    assembled_files = list(session_dir.glob("assembled.*"))
+    if not assembled_files:
+        raise HTTPException(status_code=404, detail="Session not found or not yet assembled")
+
+    tmp_input_path = str(assembled_files[0])
+
+    def generate():
+        try:
+            start_time = time.time()
+
+            result_id = uuid.uuid4().hex[:12]
+            output_filename = f"{result_id}.mp4"
+            output_path = str(RESULTS_DIR / output_filename)
+            processor = VideoProcessor(tmp_input_path, output_path)
+            metadata = processor.get_metadata()
+
+            logger.info(
+                "Assembled-session processing: %d frames, %.1f fps, %dx%d",
+                metadata["total_frames"], metadata["fps"],
+                metadata["width"], metadata["height"],
+            )
+
+            detector = get_detection_service()
+            poser = get_pose_service()
+
+            detection_counts: dict[str, int] = {}
+            frames_with_pose = 0
+            total_frames = metadata["total_frames"]
+            last_event_time = time.time()
+
+            for frame_idx, frame_bgr in processor.frames():
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+                detections = detector.detect(
+                    frame_bgr,
+                    confidence_threshold=confidence,
+                    debug=(debug and frame_idx == 0),
+                )
+
+                for det in detections:
+                    label = det["label"]
+                    detection_counts[label] = detection_counts.get(label, 0) + 1
+
+                pose_data = poser.estimate(frame_rgb)
+                if pose_data is not None:
+                    frames_with_pose += 1
+
+                annotated = render_overlays(frame_bgr, detections, pose_data, inplace=True)
+                processor.write_frame(annotated)
+
+                if frame_idx % preview_interval == 0 or frame_idx == total_frames - 1:
+                    preview_b64 = encode_frame_preview(annotated)
+                    yield _sse_event("progress", {
+                        "frame_index": frame_idx,
+                        "total_frames": total_frames,
+                        "percent": round(frame_idx / max(total_frames, 1) * 100, 1),
+                        "preview": preview_b64,
+                    })
+                    last_event_time = time.time()
+                elif time.time() - last_event_time > 30:
+                    yield ": keepalive\n\n"
+                    last_event_time = time.time()
+
+            processor.finalize()
+
+            elapsed = time.time() - start_time
+            logger.info("Assembled-session processing complete in %.1fs", elapsed)
+
+            yield _sse_event("complete", {
+                "download_url": f"/uploads/results/{output_filename}",
+                "fps": metadata["fps"],
+                "total_frames": metadata["total_frames"],
+                "duration_seconds": metadata["duration_seconds"],
+                "width": metadata["width"],
+                "height": metadata["height"],
+                "detection_summary": detection_counts,
+                "frames_with_pose": frames_with_pose,
+                "processing_time_seconds": round(elapsed, 2),
+            })
+
+        except Exception as exc:
+            logger.exception("Error during assembled-session processing")
+            yield _sse_event("error", {"detail": str(exc)})
+
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
 
     return StreamingResponse(
         generate(),
