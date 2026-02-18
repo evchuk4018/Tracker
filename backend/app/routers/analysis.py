@@ -540,59 +540,68 @@ async def upload_chunk(
     if not re.match(r'^\.[a-zA-Z0-9]{1,10}$', ext):
         raise HTTPException(status_code=400, detail="Invalid extension")
 
-    session_dir = CHUNKS_DIR / session_id
-    session_dir.mkdir(exist_ok=True)
+    try:
+        session_dir = CHUNKS_DIR / session_id
+        session_dir.mkdir(exist_ok=True)
 
-    # Read the full chunk into memory (max 1 MB — safe)
-    chunk_data = await file.read()
+        # Read the full chunk into memory (max 1 MB — safe)
+        chunk_data = await file.read()
 
-    # Save to disk (still needed for assembly / metadata extraction)
-    chunk_path = session_dir / f"{chunk_index:06d}.bin"
-    with open(chunk_path, "wb") as f:
-        f.write(chunk_data)
+        # Save to disk (still needed for assembly / metadata extraction)
+        chunk_path = session_dir / f"{chunk_index:06d}.bin"
+        with open(chunk_path, "wb") as f:
+            f.write(chunk_data)
 
-    received = len(list(session_dir.glob("*.bin")))
-    assembled = received == total_chunks
+        received = len(list(session_dir.glob("*.bin")))
+        assembled = received == total_chunks
 
-    # --- Streaming processing integration ---
-    with _sessions_lock:
-        session = _active_sessions.get(session_id)
-
-    if session is None and chunk_index == 0:
-        session = ProcessingSession(
-            session_id=session_id,
-            ext=ext,
-            total_chunks=total_chunks,
-            confidence=confidence,
-            debug=debug,
-            preview_interval=preview_interval,
-            plate_r=plate_r,
-            plate_g=plate_g,
-            plate_b=plate_b,
-        )
+        # --- Streaming processing integration ---
         with _sessions_lock:
-            _active_sessions[session_id] = session
+            session = _active_sessions.get(session_id)
 
-    if session is not None:
-        session.feed_chunk(chunk_data)
+        if session is None and chunk_index == 0:
+            session = ProcessingSession(
+                session_id=session_id,
+                ext=ext,
+                total_chunks=total_chunks,
+                confidence=confidence,
+                debug=debug,
+                preview_interval=preview_interval,
+                plate_r=plate_r,
+                plate_g=plate_g,
+                plate_b=plate_b,
+            )
+            with _sessions_lock:
+                _active_sessions[session_id] = session
 
-    # Assemble on disk when all chunks received (for metadata extraction)
-    if assembled:
-        assembled_path = session_dir / f"assembled{ext}"
-        with open(assembled_path, "wb") as out:
-            for i in range(total_chunks):
-                cp = session_dir / f"{i:06d}.bin"
-                out.write(cp.read_bytes())
-                cp.unlink()
         if session is not None:
-            session.resolve_metadata(assembled_path)
+            session.feed_chunk(chunk_data)
 
-    return {
-        "session_id": session_id,
-        "chunks_received": received,
-        "assembled": assembled,
-        "streaming": session is not None,
-    }
+        # Assemble on disk when all chunks received (for metadata extraction)
+        if assembled:
+            assembled_path = session_dir / f"assembled{ext}"
+            with open(assembled_path, "wb") as out:
+                for i in range(total_chunks):
+                    cp = session_dir / f"{i:06d}.bin"
+                    out.write(cp.read_bytes())
+                    cp.unlink()
+            if session is not None:
+                session.resolve_metadata(assembled_path)
+
+        return {
+            "session_id": session_id,
+            "chunks_received": received,
+            "assembled": assembled,
+            "streaming": session is not None,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "upload_chunk failed: session=%s chunk=%d/%d ext=%s",
+            session_id, chunk_index, total_chunks, ext,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/analyze-assembled/{session_id}")
